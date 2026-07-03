@@ -1,0 +1,59 @@
+{
+  "name": "vscode-python-ta",
+  "displayName": "PythonTA",
+  "description": "Run PythonTA checks and display diagnostics in VS Code.",
+  "version": "0.0.1",
+  "publisher": "pyta-uoft",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pyta-uoft/pyta"
+  },
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": ["Linters"],
+  "activationEvents": ["onLanguage:python"],
+  "main": "./out/extension",
+  "contributes": {
+    "commands": [
+      {
+        "command": "pythonta.check",
+        "title": "Run PythonTA"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "pythonta.check",
+        "key": "ctrl+shift+t",
+        "when": "editorLangId == python"
+      }
+    ],
+    "configuration": {
+      "title": "PythonTA",
+      "properties": {
+        "pythonta.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Python executable that has PythonTA installed. Leave empty to use the interpreter selected by the ms-python extension."
+        },
+        "pythonta.configPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a PythonTA configuration file (.python_ta). Passed to PythonTA via --config."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/vscode": "^1.100.0",
+    "typescript": "^5.9.2"
+  }
+}
