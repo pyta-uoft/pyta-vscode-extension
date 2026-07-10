@@ -3,11 +3,14 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 
 let diagnosticCollection: vscode.DiagnosticCollection;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext): void {
     diagnosticCollection = vscode.languages.createDiagnosticCollection('python-ta');
     const cmd = vscode.commands.registerCommand('pythonta.check', runPythonTA);
     context.subscriptions.push(cmd, diagnosticCollection);
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+    context.subscriptions.push(statusBarItem);
 }
 
 export function deactivate(): void {}
@@ -94,6 +97,11 @@ async function runPythonTA(): Promise<void> {
         return;
     }
 
+    if (editor.document.isUntitled) {
+        vscode.window.showWarningMessage('PythonTA: Please save the file before running the linter.');
+        return;
+    }
+
     const filePath = editor.document.uri.fsPath;
     
     const { python, env } = await getPythonExecutionDetails(editor.document.uri);
@@ -111,9 +119,8 @@ async function runPythonTA(): Promise<void> {
 
     args.push(filePath);
 
-    const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
-    status.text = '$(loading~spin) Running PythonTA...';
-    status.show();
+    statusBarItem.text = '$(loading~spin) Running PythonTA...';
+    statusBarItem.show();
 
     let stdout = '';
     let stderr = '';
@@ -130,12 +137,12 @@ async function runPythonTA(): Promise<void> {
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
     proc.on('error', (err: Error) => {
-        status.dispose();
+        statusBarItem.hide()
         vscode.window.showErrorMessage(`PythonTA: Failed to start process: ${err.message}`);
     });
 
     proc.on('close', (code: number | null) => {
-        status.dispose();
+        statusBarItem.hide()
 
         if (stdout.trim() === '') {
             const detail = stderr.trim() ? ` ${stderr.trim()}` : '';
@@ -151,7 +158,7 @@ async function runPythonTA(): Promise<void> {
             return;
         }
 
-        diagnosticCollection.clear();
+        diagnosticCollection.set(editor.document.uri, []);
         for (const { uri, diagnostics } of results) {
             const vscodeDiags = diagnostics.map((d) => {
                 const diag = new vscode.Diagnostic(
