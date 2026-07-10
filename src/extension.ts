@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
+import * as path from 'path';
 
 let diagnosticCollection: vscode.DiagnosticCollection;
 
@@ -11,7 +12,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {}
 
-async function getPythonPath(): Promise<string> {
+async function getPythonExecutionDetails(resource: vscode.Uri): Promise<{ python: string; env: NodeJS.ProcessEnv }> {
+    let python = 'python';
+
     const pythonExt = vscode.extensions.getExtension('ms-python.python');
     if (pythonExt) {
         if (!pythonExt.isActive) {
@@ -23,24 +26,38 @@ async function getPythonPath(): Promise<string> {
         // Current API (ms-python >= 2022.2): resolves the active environment's executable,
         // including virtual environments and conda envs.
         if (typeof api?.environments?.getActiveEnvironmentPath === 'function') {
-            const envPath = api.environments.getActiveEnvironmentPath();
+            const envPath = api.environments.getActiveEnvironmentPath(resource);
             const resolved = await api.environments.resolveEnvironment(envPath);
-            const execPath: string | undefined = resolved?.executable?.uri?.fsPath;
-            if (execPath) {
-                return execPath;
+            if (resolved?.executable?.uri?.fsPath) {
+                python = resolved.executable.uri.fsPath;
             }
-        }
-
-        // Legacy API fallback (ms-python < 2022.2)
-        const execCommand: string[] | undefined =
-            api?.settings?.getExecutionDetails?.()?.execCommand;
-        if (execCommand && execCommand.length > 0) {
-            return execCommand[0];
+        } else {
+            const execCommand: string[] | undefined =
+                api?.settings?.getExecutionDetails?.(resource)?.execCommand;
+            if (execCommand && execCommand.length > 0) {
+                python = execCommand[0];
+            }
         }
     }
 
-    const setting = vscode.workspace.getConfiguration('pythonta').get<string>('pythonPath');
-    return setting || 'python';
+    if (python === 'python') {
+        const setting = vscode.workspace.getConfiguration('pythonta').get<string>('pythonPath');
+        if (setting) {
+            python = setting;
+        }
+    }
+
+    const env = Object.assign({}, process.env);
+    if (python !== 'python') {
+        const pythonDir = path.dirname(python);
+        const venvDir = path.dirname(pythonDir);
+        
+        env.PATH = `${pythonDir}${path.delimiter}${env.PATH || ''}`;
+        env.VIRTUAL_ENV = venvDir;
+        delete env.PYTHONHOME;
+    }
+
+    return { python, env };
 }
 
 function lspSeverityToVscode(severity: number): vscode.DiagnosticSeverity {
@@ -78,15 +95,21 @@ async function runPythonTA(): Promise<void> {
     }
 
     const filePath = editor.document.uri.fsPath;
-    const python = await getPythonPath();
+    
+    const { python, env } = await getPythonExecutionDetails(editor.document.uri);
 
     const config = vscode.workspace.getConfiguration('pythonta');
     const configPath = config.get<string>('configPath');
 
-    const args = ['-m', 'python_ta', '--output-format', 'pyta-lsp', filePath];
-    // if (configPath) {
-    //     args.push('--config', configPath);
-    // }
+    const args = ['-m', 'python_ta'];
+
+    if (configPath && configPath.trim() !== '') {
+        args.push('--config', configPath.trim());
+    }
+
+    args.push('--output-format', 'pyta-lsp');
+
+    args.push(filePath);
 
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
     status.text = '$(loading~spin) Running PythonTA...';
@@ -95,7 +118,14 @@ async function runPythonTA(): Promise<void> {
     let stdout = '';
     let stderr = '';
 
-    const proc = spawn(python, args);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    const cwd = workspaceFolder ? workspaceFolder.uri.fsPath : undefined;
+
+    const proc = spawn(python, args, {
+        cwd: cwd,
+        env: env
+    });
+    
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
