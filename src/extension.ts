@@ -1,17 +1,23 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
+import * as path from 'path';
 
 let diagnosticCollection: vscode.DiagnosticCollection;
+let statusBarItem: vscode.StatusBarItem;
 
 export function activate(context: vscode.ExtensionContext): void {
     diagnosticCollection = vscode.languages.createDiagnosticCollection('python-ta');
     const cmd = vscode.commands.registerCommand('pythonta.check', runPythonTA);
     context.subscriptions.push(cmd, diagnosticCollection);
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+    context.subscriptions.push(statusBarItem);
 }
 
 export function deactivate(): void {}
 
-async function getPythonPath(): Promise<string> {
+async function getPythonExecutionDetails(resource: vscode.Uri): Promise<{ python: string; env: NodeJS.ProcessEnv }> {
+    let python = 'python';
+
     const pythonExt = vscode.extensions.getExtension('ms-python.python');
     if (pythonExt) {
         if (!pythonExt.isActive) {
@@ -23,24 +29,38 @@ async function getPythonPath(): Promise<string> {
         // Current API (ms-python >= 2022.2): resolves the active environment's executable,
         // including virtual environments and conda envs.
         if (typeof api?.environments?.getActiveEnvironmentPath === 'function') {
-            const envPath = api.environments.getActiveEnvironmentPath();
+            const envPath = api.environments.getActiveEnvironmentPath(resource);
             const resolved = await api.environments.resolveEnvironment(envPath);
-            const execPath: string | undefined = resolved?.executable?.uri?.fsPath;
-            if (execPath) {
-                return execPath;
+            if (resolved?.executable?.uri?.fsPath) {
+                python = resolved.executable.uri.fsPath;
             }
-        }
-
-        // Legacy API fallback (ms-python < 2022.2)
-        const execCommand: string[] | undefined =
-            api?.settings?.getExecutionDetails?.()?.execCommand;
-        if (execCommand && execCommand.length > 0) {
-            return execCommand[0];
+        } else {
+            const execCommand: string[] | undefined =
+                api?.settings?.getExecutionDetails?.(resource)?.execCommand;
+            if (execCommand && execCommand.length > 0) {
+                python = execCommand[0];
+            }
         }
     }
 
-    const setting = vscode.workspace.getConfiguration('pythonta').get<string>('pythonPath');
-    return setting || 'python';
+    if (python === 'python') {
+        const setting = vscode.workspace.getConfiguration('pythonta').get<string>('pythonPath');
+        if (setting) {
+            python = setting;
+        }
+    }
+
+    const env = Object.assign({}, process.env);
+    if (python !== 'python') {
+        const pythonDir = path.dirname(python);
+        const venvDir = path.dirname(pythonDir);
+        
+        env.PATH = `${pythonDir}${path.delimiter}${env.PATH || ''}`;
+        env.VIRTUAL_ENV = venvDir;
+        delete env.PYTHONHOME;
+    }
+
+    return { python, env };
 }
 
 function lspSeverityToVscode(severity: number): vscode.DiagnosticSeverity {
@@ -77,35 +97,52 @@ async function runPythonTA(): Promise<void> {
         return;
     }
 
+    if (editor.document.isUntitled) {
+        vscode.window.showWarningMessage('PythonTA: Please save the file before running the linter.');
+        return;
+    }
+
     const filePath = editor.document.uri.fsPath;
-    const python = await getPythonPath();
+    
+    const { python, env } = await getPythonExecutionDetails(editor.document.uri);
 
     const config = vscode.workspace.getConfiguration('pythonta');
     const configPath = config.get<string>('configPath');
 
-    const args = ['-m', 'python_ta', '--output-format', 'pyta-lsp', filePath];
-    // if (configPath) {
-    //     args.push('--config', configPath);
-    // }
+    const args = ['-m', 'python_ta'];
 
-    const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
-    status.text = '$(loading~spin) Running PythonTA...';
-    status.show();
+    if (configPath && configPath.trim() !== '') {
+        args.push('--config', configPath.trim());
+    }
+
+    args.push('--output-format', 'pyta-lsp');
+
+    args.push(filePath);
+
+    statusBarItem.text = '$(loading~spin) Running PythonTA...';
+    statusBarItem.show();
 
     let stdout = '';
     let stderr = '';
 
-    const proc = spawn(python, args);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+    const cwd = workspaceFolder ? workspaceFolder.uri.fsPath : undefined;
+
+    const proc = spawn(python, args, {
+        cwd: cwd,
+        env: env
+    });
+    
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
 
     proc.on('error', (err: Error) => {
-        status.dispose();
+        statusBarItem.hide()
         vscode.window.showErrorMessage(`PythonTA: Failed to start process: ${err.message}`);
     });
 
     proc.on('close', (code: number | null) => {
-        status.dispose();
+        statusBarItem.hide()
 
         if (stdout.trim() === '') {
             const detail = stderr.trim() ? ` ${stderr.trim()}` : '';
@@ -121,7 +158,7 @@ async function runPythonTA(): Promise<void> {
             return;
         }
 
-        diagnosticCollection.clear();
+        diagnosticCollection.set(editor.document.uri, []);
         for (const { uri, diagnostics } of results) {
             const vscodeDiags = diagnostics.map((d) => {
                 const diag = new vscode.Diagnostic(
